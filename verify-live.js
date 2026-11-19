@@ -1,7 +1,7 @@
 // Live Verification Script against public HTTPS & WSS deployment
 const { io: ioClient } = require('socket.io-client');
 
-const LIVE_URL = 'https://governmental-killing-southeast-takes.trycloudflare.com';
+const LIVE_URL = process.env.LIVE_URL || 'https://eazychat.35-192-68-101.nip.io';
 
 async function req(endpoint, options = {}) {
   const headers = Object.assign({}, options.headers || {});
