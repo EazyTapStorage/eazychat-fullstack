@@ -138,6 +138,79 @@ async function verifyLive() {
   }
   console.log('✓ Hardening verified over live HTTPS: rejected non-image upload with clean HTTP 400 JSON');
 
+  // 8. Test live voice note audio upload endpoint
+  const audioBoundary = '----WebKitFormBoundaryLiveAudio456';
+  const dummyWebm = Buffer.from([
+    0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81, 0x01, 0x42, 0xf7, 0x81,
+    0x01, 0x42, 0xf2, 0x81, 0x04, 0x42, 0xf3, 0x81, 0x08, 0x42, 0x82, 0x84,
+    0x77, 0x65, 0x62, 0x6d, 0x42, 0x87, 0x81, 0x02, 0x42, 0x85, 0x81, 0x02
+  ]);
+  const audioData = Buffer.concat([
+    Buffer.from(`--${audioBoundary}\r\nContent-Disposition: form-data; name="audio"; filename="live-voice.webm"\r\nContent-Type: audio/webm\r\n\r\n`),
+    dummyWebm,
+    Buffer.from(`\r\n--${audioBoundary}--\r\n`)
+  ]);
+  const audioUploadRes = await fetch(`${LIVE_URL}/api/upload-audio`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenA}`,
+      'Content-Type': `multipart/form-data; boundary=${audioBoundary}`
+    },
+    body: audioData
+  });
+  const audioUploadJson = await audioUploadRes.json().catch(() => ({}));
+  if (audioUploadRes.status !== 201 || !audioUploadJson.audioUrl) {
+    throw new Error(`Live audio upload failed: status=${audioUploadRes.status}, data=${JSON.stringify(audioUploadJson)}`);
+  }
+  console.log(`✓ Live audio upload verified: ${audioUploadJson.audioUrl}`);
+
+  // Verify static serving of live uploaded audio
+  const fetchAudioStatic = await fetch(`${LIVE_URL}${audioUploadJson.audioUrl}`);
+  if (fetchAudioStatic.status !== 200) {
+    throw new Error(`Live uploaded audio static serving failed: status=${fetchAudioStatic.status}`);
+  }
+  console.log('✓ Live uploaded audio file accessible over HTTPS static CDN');
+
+  // 9. Send audio note message over live WSS
+  const audioReceivedPromise = new Promise(resolve => {
+    clientB.on('message:new', data => {
+      const m = data.message || data;
+      if (m.type === 'audio') resolve(m);
+    });
+  });
+
+  const sendAudioAck = await new Promise(resolve => {
+    clientA.emit('message:send', {
+      chatId: chat.id,
+      type: 'audio',
+      audioUrl: audioUploadJson.audioUrl,
+      duration: 15
+    }, resolve);
+  });
+  if (!sendAudioAck || !sendAudioAck.ok) {
+    throw new Error('Live audio message send failed');
+  }
+  const receivedAudio = await audioReceivedPromise;
+  console.log(`✓ Real-time voice note received by User B via WebSocket: duration=${receivedAudio.duration}s`);
+
+  // 10. WebRTC signaling relay verification over live WSS
+  const callIncomingPromise = new Promise(resolve => {
+    clientB.on('call:incoming', resolve);
+  });
+
+  clientA.emit('call:offer', {
+    chatId: chat.id,
+    targetUserId: userB.id,
+    offer: { type: 'offer', sdp: 'v=0\r\no=LiveA 11111 2 IN IP4 127.0.0.1...' },
+    callType: 'video'
+  });
+
+  const incomingSignal = await callIncomingPromise;
+  if (!incomingSignal || incomingSignal.chatId !== chat.id || incomingSignal.callerId !== userA.id) {
+    throw new Error('Live WebRTC incoming call signal mismatch');
+  }
+  console.log(`✓ WebRTC signaling relay verified over live WSS (caller: ${incomingSignal.callerName}, type: ${incomingSignal.callType})`);
+
   clientA.disconnect();
   clientB.disconnect();
   console.log('\n================================================================');
