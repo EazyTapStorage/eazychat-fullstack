@@ -28,7 +28,7 @@ app.set('trust proxy', 1);
 // Standard security headers via Helmet
 app.use(helmet({
   contentSecurityPolicy: false,
-  crossOriginResourcePolicy: { policy: 'same-origin' }
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
 
 const rawOrigins = process.env.ALLOWED_ORIGIN || 'http://localhost:3000';
@@ -280,12 +280,83 @@ app.patch('/api/auth/me', authMiddleware, (req, res) => {
   res.json({ user: publicUser(updated) });
 });
 
+// Commercial store-compliance: In-app account deletion
+app.delete('/api/auth/me', authMiddleware, (req, res) => {
+  const deleted = db.deleteUser(req.user.id);
+  if (!deleted) {
+    return res.status(404).json({ error: 'User not found or already deleted.' });
+  }
+  const userSockets = onlineUsers.get(req.user.id);
+  if (userSockets) {
+    userSockets.forEach(sid => {
+      const s = io.sockets.sockets.get(sid);
+      if (s) s.disconnect(true);
+    });
+    onlineUsers.delete(req.user.id);
+  }
+  io.emit('user:deleted', { userId: req.user.id });
+  res.json({ ok: true, message: 'Account and associated personal data deleted.' });
+});
+
+// Save Expo push token for background notifications
+app.post('/api/auth/push-token', authMiddleware, (req, res) => {
+  const { pushToken } = req.body || {};
+  if (!pushToken || typeof pushToken !== 'string') {
+    return res.status(400).json({ error: 'A valid Expo pushToken string is required.' });
+  }
+  db.setPushToken(req.user.id, pushToken.trim());
+  res.json({ ok: true, pushToken: pushToken.trim() });
+});
+
 // --- USERS & CHATS ROUTES ---
 app.get('/api/users', authMiddleware, (req, res) => {
   const users = db.listUsers()
     .filter(u => u.id !== req.user.id)
     .map(publicUser);
   res.json({ users });
+});
+
+// User blocking endpoints (store compliance)
+app.post('/api/users/:id/block', authMiddleware, (req, res) => {
+  const targetId = req.params.id;
+  if (targetId === req.user.id) {
+    return res.status(400).json({ error: 'You cannot block yourself.' });
+  }
+  const target = db.findUserById(targetId);
+  if (!target) {
+    return res.status(404).json({ error: 'User not found.' });
+  }
+  db.blockUser(req.user.id, targetId);
+  res.json({ ok: true, blocked: true, blockedUserId: targetId });
+});
+
+app.delete('/api/users/:id/block', authMiddleware, (req, res) => {
+  const targetId = req.params.id;
+  db.unblockUser(req.user.id, targetId);
+  res.json({ ok: true, blocked: false, unblockedUserId: targetId });
+});
+
+app.get('/api/users/blocked', authMiddleware, (req, res) => {
+  const user = db.findUserById(req.user.id);
+  const blockedUserIds = user && Array.isArray(user.blockedUsers) ? user.blockedUsers : [];
+  res.json({ blockedUserIds });
+});
+
+// Content moderation & abuse reporting endpoint
+app.post('/api/reports', authMiddleware, (req, res) => {
+  const { reportedUserId, messageId, reason } = req.body || {};
+  if (!reason || String(reason).trim().length < 3) {
+    return res.status(400).json({ error: 'Please provide a valid reason for the report.' });
+  }
+  const report = db.createReport({
+    id: uuidv4(),
+    reporterId: req.user.id,
+    reportedUserId: reportedUserId || null,
+    messageId: messageId || null,
+    reason: String(reason).trim(),
+    createdAt: new Date().toISOString()
+  });
+  res.status(201).json({ ok: true, report });
 });
 
 app.get('/api/chats', authMiddleware, (req, res) => {
@@ -438,6 +509,15 @@ io.on('connection', socket => {
         return;
       }
 
+      // Check if communication between members is blocked (1-on-1 chats)
+      if (!chat.isGroup) {
+        const otherUserId = chat.members.find(m => m !== userId);
+        if (otherUserId && db.isBlocked(userId, otherUserId)) {
+          if (ack) ack({ error: 'Communication with this user is blocked.' });
+          return;
+        }
+      }
+
       const anyOtherOnline = chat.members.some(mid => mid !== userId && isUserOnline(mid));
       const sender = db.findUserById(userId);
 
@@ -464,6 +544,27 @@ io.on('connection', socket => {
 
       io.to(chatId).emit('message:new', { chatId, message });
       if (ack) ack({ ok: true, message });
+
+      // Notify offline participants via Expo push notifications if pushToken is configured
+      const offlineMembers = chat.members.filter(mid => mid !== userId && !isUserOnline(mid));
+      offlineMembers.forEach(mid => {
+        const recipient = db.findUserById(mid);
+        if (recipient && recipient.pushToken) {
+          const notifTitle = chat.isGroup ? `${chat.name} (${sender ? sender.name : 'Unknown'})` : (sender ? sender.name : 'Eazychat');
+          const notifBody = type === 'image' ? '📷 Sent a photo' : type === 'audio' ? '🎤 Sent a voice note' : trimmed;
+          fetch('https://exp.host/--/api/v2/push/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              to: recipient.pushToken,
+              title: notifTitle,
+              body: notifBody,
+              data: { chatId, senderId: userId },
+              sound: 'default'
+            })
+          }).catch(() => {});
+        }
+      });
     } catch (err) {
       if (ack) ack({ error: 'Failed to send message' });
     }
@@ -519,6 +620,9 @@ io.on('connection', socket => {
     const chat = db.findChatById(chatId);
     if (!chat || !chat.members.includes(userId) || !chat.members.includes(targetUserId)) {
       return socket.emit('call:rejected', { chatId, reason: 'Invalid call session' });
+    }
+    if (db.isBlocked(userId, targetUserId)) {
+      return socket.emit('call:rejected', { chatId, reason: 'Communication with this user is blocked.' });
     }
     const caller = db.findUserById(userId);
     const sent = sendCallSignal(targetUserId, 'call:incoming', {
@@ -585,6 +689,15 @@ io.on('connection', socket => {
       }
     }
   });
+});
+
+// Policy pages for App Store & Google Play compliance
+app.get('/privacy', (_req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'public', 'privacy.html'));
+});
+
+app.get('/terms', (_req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'public', 'terms.html'));
 });
 
 // Fallback to index.html for SPA

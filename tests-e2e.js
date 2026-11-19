@@ -579,7 +579,75 @@ async function runTests() {
   sockClientA.disconnect();
   sockClientB.disconnect();
 
-  console.log('\n--- 8. RATE LIMITING AUDIT ---');
+  console.log('\n--- 8. COMMERCIAL STORE-COMPLIANCE AUDIT ---');
+  // 1. Privacy Policy & Terms of Service endpoints
+  const privacyRes = await fetch(`http://localhost:${process.env.PORT}/privacy`);
+  const privacyHtml = await privacyRes.text();
+  assert(privacyRes.status === 200 && privacyHtml.includes('Eazychat Privacy Policy'), 'GET /privacy serves HTML policy');
+
+  const termsRes = await fetch(`http://localhost:${process.env.PORT}/terms`);
+  const termsHtml = await termsRes.text();
+  assert(termsRes.status === 200 && termsHtml.includes('Eazychat Terms of Service'), 'GET /terms serves HTML terms');
+
+  // 2. Block User Endpoint
+  const blockRes = await request(`/api/users/${userB.id}/block`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenA}` }
+  });
+  assert(blockRes.status === 200 && blockRes.data.blocked === true, 'POST /api/users/:id/block blocks target user');
+
+  // Verify blocked messaging enforcement
+  const sockA = ioClient(socketUrl, { transports: ['websocket'], auth: { token: tokenA } });
+  await new Promise(r => sockA.on('connect', r));
+
+  const blockedSendRes = await new Promise(resolve => {
+    sockA.emit('message:send', { chatId, type: 'text', text: 'Blocked message attempt' }, resolve);
+  });
+  assert(blockedSendRes && blockedSendRes.error === 'Communication with this user is blocked.', 'Messaging blocked between blocked users');
+
+  // 3. Unblock User Endpoint
+  const unblockRes = await request(`/api/users/${userB.id}/block`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${tokenA}` }
+  });
+  assert(unblockRes.status === 200 && unblockRes.data.blocked === false, 'DELETE /api/users/:id/block unblocks target user');
+
+  const unblockedSendRes = await new Promise(resolve => {
+    sockA.emit('message:send', { chatId, type: 'text', text: 'Unblocked message test' }, resolve);
+  });
+  assert(unblockedSendRes && unblockedSendRes.ok === true, 'Messaging succeeds after unblocking user');
+  sockA.disconnect();
+
+  // 4. Abuse Report Endpoint
+  const reportRes = await request('/api/reports', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenA}` },
+    body: { reportedUserId: userB.id, messageId: sentMsgId, reason: 'Inappropriate spam content' }
+  });
+  assert(reportRes.status === 201 && reportRes.data.ok === true, 'POST /api/reports submits abuse report');
+  assert(reportRes.data.report.reason === 'Inappropriate spam content', 'Abuse report captures reason and reporter metadata');
+
+  // 5. Push Token Registration Endpoint
+  const pushRes = await request('/api/auth/push-token', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenA}` },
+    body: { pushToken: 'ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]' }
+  });
+  assert(pushRes.status === 200 && pushRes.data.ok === true, 'POST /api/auth/push-token registers Expo push token');
+
+  // 6. In-App Account Deletion
+  const deleteMeRes = await request('/api/auth/me', {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${tokenC}` } // delete user C
+  });
+  assert(deleteMeRes.status === 200 && deleteMeRes.data.ok === true, 'DELETE /api/auth/me permanently deletes user account');
+
+  const verifyDeleted = await request('/api/auth/me', {
+    headers: { Authorization: `Bearer ${tokenC}` }
+  });
+  assert(verifyDeleted.status === 401, 'Deleted user cannot authenticate after account deletion');
+
+  console.log('\n--- 9. RATE LIMITING AUDIT ---');
   let rateLimitHit = null;
   for (let i = 0; i < 25; i++) {
     const res = await request('/api/auth/login', {
