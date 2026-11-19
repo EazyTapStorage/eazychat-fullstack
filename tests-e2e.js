@@ -383,6 +383,189 @@ async function runTests() {
   assert(oversizedUpload.status === 400, 'Oversized file (> 5 MB) rejected with HTTP 400');
   assert(oversizedUpload.data && oversizedUpload.data.error === 'File size exceeds 5 MB limit.', 'Returns clean JSON error for oversized file');
 
+  console.log('\n--- 6. AUDIO VOICE NOTES & RECORDING AUDIT ---');
+  // Upload valid audio note (dummy webm/opus audio payload)
+  const dummyWebm = Buffer.from([
+    0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81, 0x01, 0x42, 0xf7, 0x81,
+    0x01, 0x42, 0xf2, 0x81, 0x04, 0x42, 0xf3, 0x81, 0x08, 0x42, 0x82, 0x84,
+    0x77, 0x65, 0x62, 0x6d, 0x42, 0x87, 0x81, 0x02, 0x42, 0x85, 0x81, 0x02
+  ]);
+
+  const audioBoundary = '----WebKitFormBoundaryAudio456';
+  const audioPostData = Buffer.concat([
+    Buffer.from(`--${audioBoundary}\r\nContent-Disposition: form-data; name="audio"; filename="voice-note.webm"\r\nContent-Type: audio/webm\r\n\r\n`),
+    dummyWebm,
+    Buffer.from(`\r\n--${audioBoundary}--\r\n`)
+  ]);
+
+  const uploadAudioRes = await request('/api/upload-audio', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenA}`,
+      'Content-Type': `multipart/form-data; boundary=${audioBoundary}`
+    },
+    body: audioPostData
+  });
+  assert(uploadAudioRes.status === 201, 'Voice note upload succeeds with HTTP 201');
+  assert(uploadAudioRes.data.audioUrl && uploadAudioRes.data.audioUrl.startsWith('/uploads/'), 'Audio URL returned under /uploads/ namespace');
+
+  // Verify uploaded audio static route
+  const fetchAudio = await fetch(`http://localhost:${process.env.PORT}${uploadAudioRes.data.audioUrl}`);
+  assert(fetchAudio.status === 200, 'Uploaded audio file is publicly accessible via static route');
+
+  // Reject non-audio upload to /api/upload-audio
+  const badAudioData = Buffer.concat([
+    Buffer.from(`--${audioBoundary}\r\nContent-Disposition: form-data; name="audio"; filename="document.pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.4\r\n`),
+    Buffer.from(`\r\n--${audioBoundary}--\r\n`)
+  ]);
+  const badAudioUpload = await request('/api/upload-audio', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenA}`,
+      'Content-Type': `multipart/form-data; boundary=${audioBoundary}`
+    },
+    body: badAudioData
+  });
+  assert(badAudioUpload.status === 400, 'Non-audio file rejected by /api/upload-audio with HTTP 400');
+  assert(badAudioUpload.data && badAudioUpload.data.error === 'Only audio files are allowed.', 'Clean JSON error returned for non-audio file');
+
+  // Reject oversized audio file (> 10 MB)
+  const largeAudioPayload = Buffer.alloc(10.5 * 1024 * 1024, '0');
+  const oversizedAudioData = Buffer.concat([
+    Buffer.from(`--${audioBoundary}\r\nContent-Disposition: form-data; name="audio"; filename="large-voice.webm"\r\nContent-Type: audio/webm\r\n\r\n`),
+    largeAudioPayload,
+    Buffer.from(`\r\n--${audioBoundary}--\r\n`)
+  ]);
+  const oversizedAudioUpload = await request('/api/upload-audio', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenA}`,
+      'Content-Type': `multipart/form-data; boundary=${audioBoundary}`
+    },
+    body: oversizedAudioData
+  });
+  assert(oversizedAudioUpload.status === 400, 'Oversized audio file (> 10 MB) rejected with HTTP 400');
+  assert(oversizedAudioUpload.data && oversizedAudioUpload.data.error === 'Audio file size exceeds 10 MB limit.', 'Clean JSON error for oversized audio file');
+
+  // Re-connect sockets to verify audio message and WebRTC signaling
+  const sockClientA = ioClient(socketUrl, { transports: ['websocket'], auth: { token: tokenA } });
+  const sockClientB = ioClient(socketUrl, { transports: ['websocket'], auth: { token: tokenB } });
+
+  await Promise.all([
+    new Promise(r => sockClientA.on('connect', r)),
+    new Promise(r => sockClientB.on('connect', r)),
+  ]);
+
+  let audioMsgReceived = null;
+  sockClientB.on('message:new', ({ chatId: cid, message }) => {
+    if (cid === chatId && message.type === 'audio') audioMsgReceived = message;
+  });
+
+  const sendAudioAck = await new Promise(resolve => {
+    sockClientA.emit('message:send', {
+      chatId,
+      type: 'audio',
+      audioUrl: uploadAudioRes.data.audioUrl,
+      duration: 12
+    }, resolve);
+  });
+
+  assert(sendAudioAck.ok === true, 'Audio voice message acknowledged by server');
+  assert(sendAudioAck.message.type === 'audio', 'Message type is audio');
+  assert(sendAudioAck.message.duration === 12, 'Audio message records duration in seconds');
+
+  await new Promise(r => setTimeout(r, 100));
+  assert(Boolean(audioMsgReceived), 'Client B received real-time audio voice note message');
+  assert(audioMsgReceived.audioUrl === uploadAudioRes.data.audioUrl, 'Audio URL matches uploaded voice file');
+
+  console.log('\n--- 7. 1-ON-1 WEBRTC SIGNALING RELAY AUDIT ---');
+  let incomingCallData = null;
+  sockClientB.on('call:incoming', data => {
+    incomingCallData = data;
+  });
+
+  // Client A calls Client B
+  sockClientA.emit('call:offer', {
+    chatId,
+    targetUserId: userB.id,
+    offer: { type: 'offer', sdp: 'v=0\r\no=ClientA 12345 2 IN IP4 127.0.0.1...' },
+    callType: 'video'
+  });
+
+  await new Promise(r => setTimeout(r, 100));
+  assert(Boolean(incomingCallData), 'Client B received call:incoming signaling event');
+  assert(incomingCallData.chatId === chatId, 'Incoming call matches active chatId');
+  assert(incomingCallData.callerId === userA.id, 'Incoming call identifies caller User A');
+  assert(incomingCallData.callType === 'video', 'Incoming call specifies callType video');
+  assert(incomingCallData.offer.type === 'offer', 'Incoming call forwards complete SDP offer');
+
+  // Client B answers Client A
+  let answeredCallData = null;
+  sockClientA.on('call:answered', data => {
+    answeredCallData = data;
+  });
+
+  sockClientB.emit('call:answer', {
+    chatId,
+    targetUserId: userA.id,
+    answer: { type: 'answer', sdp: 'v=0\r\no=ClientB 67890 2 IN IP4 127.0.0.1...' }
+  });
+
+  await new Promise(r => setTimeout(r, 100));
+  assert(Boolean(answeredCallData), 'Client A received call:answered signaling event');
+  assert(answeredCallData.userId === userB.id, 'Answer confirms recipient User B');
+  assert(answeredCallData.answer.type === 'answer', 'Answer contains complete SDP answer');
+
+  // ICE Candidate relay
+  let iceCandidateReceived = null;
+  sockClientB.on('call:ice-candidate', data => {
+    iceCandidateReceived = data;
+  });
+
+  sockClientA.emit('call:ice-candidate', {
+    chatId,
+    targetUserId: userB.id,
+    candidate: { candidate: 'candidate:dummy1234 1 udp 2122260223 127.0.0.1 50000 typ host', sdpMid: '0', sdpMLineIndex: 0 }
+  });
+
+  await new Promise(r => setTimeout(r, 100));
+  assert(Boolean(iceCandidateReceived), 'Client B received call:ice-candidate relay');
+  assert(iceCandidateReceived.candidate.sdpMid === '0', 'ICE candidate payload intact');
+
+  // Call Hangup / Termination
+  let callEndedReceived = null;
+  sockClientA.on('call:ended', data => {
+    callEndedReceived = data;
+  });
+
+  sockClientB.emit('call:hangup', {
+    chatId,
+    targetUserId: userA.id
+  });
+
+  await new Promise(r => setTimeout(r, 100));
+  assert(Boolean(callEndedReceived), 'Client A received call:ended event when Client B hangs up');
+
+  // Call Reject to offline or invalid user
+  let callRejectReceived = null;
+  sockClientA.on('call:rejected', data => {
+    callRejectReceived = data;
+  });
+
+  // Call to non-existent / offline user
+  sockClientA.emit('call:offer', {
+    chatId,
+    targetUserId: 'offline-user-999',
+    offer: { type: 'offer', sdp: 'test' },
+    callType: 'voice'
+  });
+
+  await new Promise(r => setTimeout(r, 100));
+  assert(Boolean(callRejectReceived), 'Client A receives call:rejected when calling invalid/offline user');
+
+  sockClientA.disconnect();
+  sockClientB.disconnect();
+
   console.log('\n================================================================================');
   console.log(`AUDIT RESULTS: ${passed} PASSED | ${failed} FAILED | TOTAL: ${passed + failed}`);
   console.log('================================================================================\n');

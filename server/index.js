@@ -52,6 +52,28 @@ const upload = multer({
   }
 });
 
+// Multer setup for voice audio uploads (up to 10 MB)
+const audioStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || '').toLowerCase() || '.webm';
+    cb(null, `audio-${Date.now()}-${uuidv4().slice(0, 8)}${ext}`);
+  }
+});
+
+const uploadAudio = multer({
+  storage: audioStorage,
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['audio/webm', 'audio/ogg', 'audio/mp4', 'audio/mpeg', 'audio/wav', 'audio/aac', 'audio/x-m4a'];
+    if (file.mimetype && (file.mimetype.startsWith('audio/') || allowed.includes(file.mimetype) || file.mimetype === 'video/webm')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only audio files are allowed.'));
+    }
+  }
+});
+
 // Track online users: userId -> Set of socket IDs
 const onlineUsers = new Map();
 
@@ -297,6 +319,11 @@ app.post('/api/upload', authMiddleware, upload.single('image'), (req, res) => {
   res.status(201).json({ imageUrl: `/uploads/${req.file.filename}` });
 });
 
+app.post('/api/upload-audio', authMiddleware, uploadAudio.single('audio'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No audio file uploaded.' });
+  res.status(201).json({ audioUrl: `/uploads/${req.file.filename}` });
+});
+
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', app: 'Eazychat' });
 });
@@ -332,7 +359,7 @@ io.on('connection', socket => {
 
   socket.on('message:send', (payload, ack) => {
     try {
-      const { chatId, type = 'text', text = '', imageUrl = '', replyTo = null } = payload || {};
+      const { chatId, type = 'text', text = '', imageUrl = '', audioUrl = '', duration = 0, replyTo = null } = payload || {};
       const chat = db.findChatById(chatId);
       if (!chat || !chat.members.includes(userId)) {
         if (ack) ack({ error: 'Chat not found' });
@@ -342,6 +369,10 @@ io.on('connection', socket => {
       const trimmed = String(text || '').trim();
       if (type === 'text' && !trimmed) {
         if (ack) ack({ error: 'Message cannot be empty' });
+        return;
+      }
+      if (type === 'audio' && !audioUrl) {
+        if (ack) ack({ error: 'Audio URL is required' });
         return;
       }
 
@@ -356,6 +387,8 @@ io.on('connection', socket => {
         type,
         text: trimmed,
         imageUrl: type === 'image' ? imageUrl : '',
+        audioUrl: type === 'audio' ? audioUrl : '',
+        duration: type === 'audio' ? Math.round(Number(duration || 0)) : 0,
         replyTo: replyTo ? {
           id: replyTo.id,
           senderName: replyTo.senderName,
@@ -410,6 +443,74 @@ io.on('connection', socket => {
     socket.to(chatId).emit('typing:update', { chatId, userId, isTyping: false });
   });
 
+  // --- WEBRTC 1-ON-1 AUDIO/VIDEO CALL SIGNALING ---
+  function sendCallSignal(targetUid, eventName, data) {
+    const sockets = onlineUsers.get(targetUid);
+    if (sockets && sockets.size > 0) {
+      sockets.forEach(sid => io.to(sid).emit(eventName, data));
+      return true;
+    }
+    return false;
+  }
+
+  socket.on('call:offer', ({ chatId, targetUserId, offer, callType }) => {
+    const chat = db.findChatById(chatId);
+    if (!chat || !chat.members.includes(userId) || !chat.members.includes(targetUserId)) {
+      return socket.emit('call:rejected', { chatId, reason: 'Invalid call session' });
+    }
+    const caller = db.findUserById(userId);
+    const sent = sendCallSignal(targetUserId, 'call:incoming', {
+      chatId,
+      callerId: userId,
+      callerName: caller ? caller.name : 'Unknown',
+      callerColor: caller ? caller.color : '#00a884',
+      offer,
+      callType: callType || 'video'
+    });
+    if (!sent) {
+      socket.emit('call:rejected', { chatId, targetUserId, reason: 'User is currently offline' });
+    }
+  });
+
+  socket.on('call:answer', ({ chatId, targetUserId, answer }) => {
+    const chat = db.findChatById(chatId);
+    if (!chat || !chat.members.includes(userId) || !chat.members.includes(targetUserId)) return;
+    sendCallSignal(targetUserId, 'call:answered', {
+      chatId,
+      userId,
+      answer
+    });
+  });
+
+  socket.on('call:ice-candidate', ({ chatId, targetUserId, candidate }) => {
+    const chat = db.findChatById(chatId);
+    if (!chat || !chat.members.includes(userId) || !chat.members.includes(targetUserId)) return;
+    sendCallSignal(targetUserId, 'call:ice-candidate', {
+      chatId,
+      userId,
+      candidate
+    });
+  });
+
+  socket.on('call:reject', ({ chatId, targetUserId, reason }) => {
+    const chat = db.findChatById(chatId);
+    if (!chat || !chat.members.includes(userId) || !chat.members.includes(targetUserId)) return;
+    sendCallSignal(targetUserId, 'call:rejected', {
+      chatId,
+      userId,
+      reason: reason || 'declined'
+    });
+  });
+
+  socket.on('call:hangup', ({ chatId, targetUserId }) => {
+    const chat = db.findChatById(chatId);
+    if (!chat || !chat.members.includes(userId) || !chat.members.includes(targetUserId)) return;
+    sendCallSignal(targetUserId, 'call:ended', {
+      chatId,
+      userId
+    });
+  });
+
   socket.on('disconnect', () => {
     const set = onlineUsers.get(userId);
     if (set) {
@@ -430,14 +531,15 @@ app.get('*', (_req, res) => {
 });
 
 // Express error handling middleware (handles Multer upload errors and general exceptions)
-app.use((err, _req, res, _next) => {
+app.use((err, req, res, _next) => {
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ error: 'File size exceeds 5 MB limit.' });
+      const isAudio = (req.originalUrl || req.url || '').includes('audio');
+      return res.status(400).json({ error: isAudio ? 'Audio file size exceeds 10 MB limit.' : 'File size exceeds 5 MB limit.' });
     }
     return res.status(400).json({ error: err.message });
   }
-  if (err && (err.message === 'Only image files are allowed' || err.message?.includes('image'))) {
+  if (err && (err.message === 'Only image files are allowed' || err.message === 'Only audio files are allowed.' || err.message?.includes('allowed'))) {
     return res.status(400).json({ error: err.message });
   }
   if (err) {

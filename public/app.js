@@ -3,6 +3,12 @@
   const THEME_KEY = 'eazychat_dark';
   const QUICK_EMOJIS = ['😀','😂','🥰','😎','🤔','🙌','🔥','✨','👍','❤️','🎉','🙏','😮','😢','🤝','💯','☕','🚀','📍','📸','✅','⚡','🎵','👋'];
   const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+  const RTC_CONFIG = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' }
+    ]
+  };
 
   let token = localStorage.getItem(TOKEN_KEY) || null;
   let currentUser = null;
@@ -19,6 +25,26 @@
   let typingTimeout = null;
   let isCurrentlyTyping = false;
   let toastTimer = null;
+
+  // In-chat search state
+  let inChatSearchQuery = '';
+  let currentSearchMatchIndex = -1;
+
+  // Voice note recording state
+  let mediaRecorder = null;
+  let audioChunks = [];
+  let recordStartTime = null;
+  let recordTimerInterval = null;
+
+  // 1-on-1 WebRTC Calling state
+  let peerConnection = null;
+  let localStream = null;
+  let activeCall = null; // { type, chatId, remoteUserId, remoteUserName, remoteUserColor }
+  let callDurationTimer = null;
+  let callStartTime = null;
+  let pendingIncomingCall = null;
+  let isAudioMuted = false;
+  let isVideoMuted = false;
 
   function showToast(msg) {
     const el = document.getElementById('toast');
@@ -143,7 +169,9 @@
         const fromMe = last.senderId === currentUser.id;
         const tick = fromMe ? tickSvg(last.status) + ' ' : '';
         const prefix = chat.isGroup && !fromMe ? `<span class="font-medium">${escapeHtml(last.senderName.split(' ')[0])}:</span> ` : '';
-        const body = last.type === 'image' ? `📷 ${escapeHtml(last.text || 'Photo')}` : escapeHtml(last.text);
+        let body = escapeHtml(last.text);
+        if (last.type === 'image') body = `📷 ${escapeHtml(last.text || 'Photo')}`;
+        else if (last.type === 'audio') body = `🎤 Voice Note ${last.duration ? `(${last.duration}s)` : ''}`;
         preview = `${tick}${prefix}${body}`;
       }
 
@@ -201,11 +229,22 @@
       statusEl.className = chat.online ? 'text-xs text-[#00a884] font-medium truncate' : 'text-xs text-sub truncate';
     }
 
+    // Direct 1-on-1 Call Buttons visibility
+    const callButtons = document.getElementById('directCallButtons');
+    if (!chat.isGroup) {
+      callButtons.classList.remove('hidden');
+      callButtons.classList.add('flex');
+    } else {
+      callButtons.classList.add('hidden');
+      callButtons.classList.remove('flex');
+    }
+
     const msgs = messagesByChat[chat.id] || [];
     const listEl = document.getElementById('messagesList');
 
     if (msgs.length === 0) {
       listEl.innerHTML = '<div class="my-12 mx-auto bg-sidebar/90 border border-theme text-sub text-xs px-4 py-2.5 rounded-xl text-center max-w-xs">No messages yet. Say hello to start the conversation!</div>';
+      updateInChatSearchCounter(0);
     } else {
       let html = msgs.map(msg => {
         const fromMe = msg.senderId === currentUser.id;
@@ -229,8 +268,32 @@
         if (msg.type === 'image' && msg.imageUrl) {
           bodyHtml += `<button type="button" data-action="lightbox" data-src="${msg.imageUrl}" class="block mb-1.5 overflow-hidden rounded-lg"><img src="${msg.imageUrl}" alt="Photo" class="max-w-full w-64 sm:w-72 h-auto rounded-lg object-cover" /></button>`;
         }
+        if (msg.type === 'audio' && msg.audioUrl) {
+          const durationSec = Math.round(Number(msg.duration || 0));
+          const mins = Math.floor(durationSec / 60);
+          const secs = durationSec % 60;
+          const durationStr = durationSec > 0 ? `${mins}:${secs < 10 ? '0' : ''}${secs}` : '';
+          bodyHtml += `
+            <div class="audio-bubble flex flex-col gap-1.5 my-1 min-w-[210px] max-w-xs">
+              <div class="flex items-center justify-between text-xs font-semibold text-[#00a884]">
+                <span class="flex items-center gap-1.5">
+                  <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15a3 3 0 003-3V6a3 3 0 00-3-3 3 3 0 00-3 3v6a3 3 0 003 3z"/></svg>
+                  Voice Note
+                </span>
+                ${durationStr ? `<span class="text-[11px] font-mono text-sub">${durationStr}</span>` : ''}
+              </div>
+              <audio controls preload="metadata" class="w-full h-8 rounded-lg mt-0.5" src="${msg.audioUrl}"></audio>
+            </div>
+          `;
+        }
         if (msg.text) {
-          bodyHtml += `<div class="text-[13.5px] leading-snug whitespace-pre-wrap break-words">${escapeHtml(msg.text)}</div>`;
+          let textHtml = escapeHtml(msg.text);
+          if (inChatSearchQuery) {
+            const escaped = escapeHtml(inChatSearchQuery).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(`(${escaped})`, 'gi');
+            textHtml = textHtml.replace(regex, '<mark class="chat-search-match bg-yellow-300 dark:bg-yellow-500 text-black px-0.5 rounded font-semibold transition">$1</mark>');
+          }
+          bodyHtml += `<div class="text-[13.5px] leading-snug whitespace-pre-wrap break-words">${textHtml}</div>`;
         }
 
         const actionsBar = `
@@ -242,7 +305,7 @@
         `;
 
         return `
-          <div class="msg-row flex ${fromMe ? 'justify-end' : 'justify-start'} items-end gap-1.5">
+          <div class="msg-row flex ${fromMe ? 'justify-end' : 'justify-start'} items-end gap-1.5" data-msg-row-id="${msg.id}">
             ${fromMe ? actionsBar : ''}
             <div class="max-w-[82%] sm:max-w-[70%] lg:max-w-[62%] flex flex-col ${fromMe ? 'items-end' : 'items-start'}">
               <div class="${fromMe ? 'bubble-out' : 'bubble-in'} px-3 py-2">
@@ -271,6 +334,18 @@
         `;
       }
       listEl.innerHTML = html;
+
+      // Update in-chat search highlights and navigation if search is active
+      if (inChatSearchQuery) {
+        const matches = document.querySelectorAll('.chat-search-match');
+        updateInChatSearchCounter(matches.length);
+        if (matches.length > 0) {
+          if (currentSearchMatchIndex < 0 || currentSearchMatchIndex >= matches.length) {
+            currentSearchMatchIndex = 0;
+          }
+          highlightCurrentMatch(matches);
+        }
+      }
     }
 
     if (scrollBottom) {
@@ -279,6 +354,469 @@
     }
   }
 
+  // --- IN-CHAT SEARCH CONTROLS ---
+  function updateInChatSearchCounter(totalMatches) {
+    const counterEl = document.getElementById('chatSearchCounter');
+    if (!counterEl) return;
+    if (totalMatches === 0) {
+      counterEl.textContent = '0 matches';
+    } else {
+      counterEl.textContent = `${currentSearchMatchIndex + 1} of ${totalMatches}`;
+    }
+  }
+
+  function highlightCurrentMatch(matches) {
+    matches.forEach((el, idx) => {
+      if (idx === currentSearchMatchIndex) {
+        el.classList.add('ring-2', 'ring-rose-500', 'bg-amber-400');
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } else {
+        el.classList.remove('ring-2', 'ring-rose-500', 'bg-amber-400');
+      }
+    });
+    updateInChatSearchCounter(matches.length);
+  }
+
+  function toggleInChatSearch(forceState) {
+    const bar = document.getElementById('chatSearchBar');
+    const isHidden = bar.classList.contains('hidden');
+    const willShow = forceState !== undefined ? forceState : isHidden;
+    if (willShow) {
+      bar.classList.remove('hidden');
+      document.getElementById('chatSearchInput').focus();
+    } else {
+      bar.classList.add('hidden');
+      inChatSearchQuery = '';
+      currentSearchMatchIndex = -1;
+      document.getElementById('chatSearchInput').value = '';
+      document.getElementById('chatSearchCounter').textContent = '0 matches';
+      renderActiveChat(false);
+    }
+  }
+
+  function stepInChatSearch(direction) {
+    const matches = document.querySelectorAll('.chat-search-match');
+    if (matches.length === 0) return;
+    if (direction === 'next') {
+      currentSearchMatchIndex = (currentSearchMatchIndex + 1) % matches.length;
+    } else {
+      currentSearchMatchIndex = (currentSearchMatchIndex - 1 + matches.length) % matches.length;
+    }
+    highlightCurrentMatch(matches);
+  }
+
+  // --- BROWSER NOTIFICATIONS ---
+  function updateNotificationIcon() {
+    const isGranted = typeof Notification !== 'undefined' && Notification.permission === 'granted';
+    const onIcon = document.getElementById('notifyIconOn');
+    const offIcon = document.getElementById('notifyIconOff');
+    if (onIcon && offIcon) {
+      onIcon.classList.toggle('hidden', !isGranted);
+      offIcon.classList.toggle('hidden', isGranted);
+    }
+  }
+
+  async function requestNotificationAccess() {
+    if (typeof Notification === 'undefined') {
+      showToast('Notifications are not supported in this browser.');
+      return;
+    }
+    if (Notification.permission === 'granted') {
+      showToast('Browser notifications are already enabled!');
+      return;
+    }
+    const perm = await Notification.requestPermission();
+    updateNotificationIcon();
+    if (perm === 'granted') {
+      showToast('Notifications enabled!');
+      try {
+        new Notification('Eazychat', {
+          body: 'Desktop notifications active for incoming messages and calls',
+          icon: '/favicon.ico'
+        });
+      } catch (_) {}
+    } else {
+      showToast('Notification permission ' + perm);
+    }
+  }
+
+  // --- REAL VOICE NOTE RECORDING (MediaRecorder) ---
+  async function startVoiceRecording() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showToast('Microphone access is not supported in this browser.');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunks = [];
+
+      let mimeType = '';
+      if (typeof MediaRecorder !== 'undefined') {
+        if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) mimeType = 'audio/webm;codecs=opus';
+        else if (MediaRecorder.isTypeSupported('audio/webm')) mimeType = 'audio/webm';
+        else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) mimeType = 'audio/ogg;codecs=opus';
+        else if (MediaRecorder.isTypeSupported('audio/mp4')) mimeType = 'audio/mp4';
+      }
+
+      mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      mediaRecorder.ondataavailable = e => {
+        if (e.data && e.data.size > 0) audioChunks.push(e.data);
+      };
+
+      recordStartTime = Date.now();
+      mediaRecorder.start(250);
+
+      document.getElementById('standardInputControls').classList.add('hidden');
+      const recBar = document.getElementById('voiceRecordingBar');
+      recBar.classList.remove('hidden');
+      recBar.classList.add('flex');
+      document.getElementById('voiceRecordTimer').textContent = '00:00';
+
+      if (recordTimerInterval) clearInterval(recordTimerInterval);
+      recordTimerInterval = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - recordStartTime) / 1000);
+        const m = Math.floor(elapsed / 60);
+        const s = elapsed % 60;
+        document.getElementById('voiceRecordTimer').textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+      }, 500);
+    } catch (err) {
+      showToast('Microphone access denied: ' + err.message);
+    }
+  }
+
+  function stopRecordingStream() {
+    if (mediaRecorder && mediaRecorder.stream) {
+      mediaRecorder.stream.getTracks().forEach(t => t.stop());
+    }
+    if (recordTimerInterval) clearInterval(recordTimerInterval);
+    recordTimerInterval = null;
+    const recBar = document.getElementById('voiceRecordingBar');
+    recBar.classList.add('hidden');
+    recBar.classList.remove('flex');
+    document.getElementById('standardInputControls').classList.remove('hidden');
+  }
+
+  function cancelVoiceRecording() {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      mediaRecorder.onstop = null;
+      mediaRecorder.stop();
+    }
+    stopRecordingStream();
+    audioChunks = [];
+    showToast('Voice note discarded');
+  }
+
+  async function sendVoiceRecording() {
+    if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+    const duration = Math.max(1, Math.round((Date.now() - recordStartTime) / 1000));
+
+    mediaRecorder.onstop = async () => {
+      try {
+        const blobType = mediaRecorder.mimeType || 'audio/webm';
+        const blob = new Blob(audioChunks, { type: blobType });
+        if (blob.size === 0) {
+          showToast('No audio captured');
+          return;
+        }
+        const fd = new FormData();
+        const ext = blobType.includes('ogg') ? 'ogg' : blobType.includes('mp4') ? 'mp4' : 'webm';
+        fd.append('audio', blob, `voice-${Date.now()}.${ext}`);
+
+        showToast('Uploading voice note...');
+        const res = await api('/api/upload-audio', { method: 'POST', body: fd });
+        if (socket && activeChatId) {
+          socket.emit('message:send', {
+            chatId: activeChatId,
+            type: 'audio',
+            audioUrl: res.audioUrl,
+            duration,
+            replyTo: replyingTo
+          });
+          replyingTo = null;
+          document.getElementById('replyBanner').classList.add('hidden');
+        }
+      } catch (err) {
+        showToast('Audio upload failed: ' + err.message);
+      } finally {
+        audioChunks = [];
+      }
+    };
+
+    mediaRecorder.stop();
+    stopRecordingStream();
+  }
+
+  // --- 1-ON-1 WEBRTC VOICE & VIDEO CALLING ---
+  function setupActiveCallUI(statusText) {
+    const modal = document.getElementById('activeCallModal');
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+
+    document.getElementById('callRemoteName').textContent = activeCall.remoteUserName;
+    document.getElementById('callStatusText').textContent = statusText;
+    const remAv = document.getElementById('callRemoteAvatar');
+    remAv.textContent = getInitials(activeCall.remoteUserName);
+    remAv.style.background = activeCall.remoteUserColor || '#00a884';
+
+    const isVoice = activeCall.type === 'voice';
+    const voiceDisp = document.getElementById('voiceCallDisplay');
+    const remoteVid = document.getElementById('remoteVideo');
+    const toggleCamBtn = document.getElementById('toggleCameraBtn');
+
+    if (isVoice) {
+      voiceDisp.classList.remove('hidden');
+      voiceDisp.classList.add('flex');
+      remoteVid.classList.add('hidden');
+      toggleCamBtn.classList.add('hidden');
+      const bigAv = document.getElementById('voiceCallBigAvatar');
+      bigAv.textContent = getInitials(activeCall.remoteUserName);
+      bigAv.style.background = activeCall.remoteUserColor || '#00a884';
+    } else {
+      voiceDisp.classList.add('hidden');
+      voiceDisp.classList.remove('flex');
+      remoteVid.classList.remove('hidden');
+      toggleCamBtn.classList.remove('hidden');
+    }
+
+    document.getElementById('callDurationTimer').textContent = '00:00';
+    isAudioMuted = false;
+    isVideoMuted = false;
+  }
+
+  function onCallConnected() {
+    document.getElementById('callStatusText').textContent = 'Connected';
+    if (!callDurationTimer) {
+      callStartTime = Date.now();
+      callDurationTimer = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - callStartTime) / 1000);
+        const m = Math.floor(elapsed / 60);
+        const s = elapsed % 60;
+        document.getElementById('callDurationTimer').textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+      }, 1000);
+    }
+  }
+
+  function endCallCleanup(toastMsg) {
+    if (callDurationTimer) clearInterval(callDurationTimer);
+    callDurationTimer = null;
+    callStartTime = null;
+
+    if (localStream) {
+      localStream.getTracks().forEach(t => t.stop());
+      localStream = null;
+    }
+
+    if (peerConnection) {
+      peerConnection.close();
+      peerConnection = null;
+    }
+
+    const remoteVideoEl = document.getElementById('remoteVideo');
+    if (remoteVideoEl) remoteVideoEl.srcObject = null;
+    const localVideoEl = document.getElementById('localVideo');
+    if (localVideoEl) localVideoEl.srcObject = null;
+
+    document.getElementById('activeCallModal').classList.add('hidden');
+    document.getElementById('activeCallModal').classList.remove('flex');
+    document.getElementById('incomingCallModal').classList.add('hidden');
+
+    pendingIncomingCall = null;
+    activeCall = null;
+
+    if (toastMsg) showToast(toastMsg);
+  }
+
+  async function initiateCall(type) {
+    const chat = chats.find(c => c.id === activeChatId);
+    if (!chat || chat.isGroup || !chat.otherUserId) {
+      showToast('Calling is available in 1-on-1 direct conversations only.');
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showToast('Calling is not supported in this browser.');
+      return;
+    }
+    try {
+      activeCall = {
+        type,
+        chatId: chat.id,
+        remoteUserId: chat.otherUserId,
+        remoteUserName: chat.name,
+        remoteUserColor: chat.color
+      };
+
+      const constraints = {
+        audio: true,
+        video: type === 'video' ? { facingMode: 'user' } : false
+      };
+      localStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      const localVideoEl = document.getElementById('localVideo');
+      localVideoEl.srcObject = localStream;
+      localVideoEl.classList.toggle('hidden', type !== 'video');
+
+      setupActiveCallUI('Calling ' + chat.name + '...');
+
+      peerConnection = new RTCPeerConnection(RTC_CONFIG);
+      localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+      peerConnection.ontrack = e => {
+        const remoteVideoEl = document.getElementById('remoteVideo');
+        if (e.streams && e.streams[0]) {
+          remoteVideoEl.srcObject = e.streams[0];
+        }
+      };
+
+      peerConnection.onicecandidate = e => {
+        if (e.candidate && activeCall && socket) {
+          socket.emit('call:ice-candidate', {
+            chatId: activeCall.chatId,
+            targetUserId: activeCall.remoteUserId,
+            candidate: e.candidate
+          });
+        }
+      };
+
+      peerConnection.onconnectionstatechange = () => {
+        if (peerConnection.connectionState === 'connected') {
+          onCallConnected();
+        } else if (['disconnected', 'failed', 'closed'].includes(peerConnection.connectionState)) {
+          endCallCleanup('Call disconnected');
+        }
+      };
+
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+
+      socket.emit('call:offer', {
+        chatId: activeCall.chatId,
+        targetUserId: activeCall.remoteUserId,
+        offer,
+        callType: type
+      });
+    } catch (err) {
+      endCallCleanup('Failed to access camera/mic: ' + err.message);
+    }
+  }
+
+  async function acceptIncomingCall() {
+    if (!pendingIncomingCall) return;
+    const call = pendingIncomingCall;
+    pendingIncomingCall = null;
+    document.getElementById('incomingCallModal').classList.add('hidden');
+
+    try {
+      activeCall = {
+        type: call.callType,
+        chatId: call.chatId,
+        remoteUserId: call.callerId,
+        remoteUserName: call.callerName,
+        remoteUserColor: call.callerColor
+      };
+
+      const constraints = {
+        audio: true,
+        video: call.callType === 'video' ? { facingMode: 'user' } : false
+      };
+      localStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      const localVideoEl = document.getElementById('localVideo');
+      localVideoEl.srcObject = localStream;
+      localVideoEl.classList.toggle('hidden', call.callType !== 'video');
+
+      setupActiveCallUI('Connecting...');
+
+      peerConnection = new RTCPeerConnection(RTC_CONFIG);
+      localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+      peerConnection.ontrack = e => {
+        const remoteVideoEl = document.getElementById('remoteVideo');
+        if (e.streams && e.streams[0]) {
+          remoteVideoEl.srcObject = e.streams[0];
+        }
+      };
+
+      peerConnection.onicecandidate = e => {
+        if (e.candidate && activeCall && socket) {
+          socket.emit('call:ice-candidate', {
+            chatId: activeCall.chatId,
+            targetUserId: activeCall.remoteUserId,
+            candidate: e.candidate
+          });
+        }
+      };
+
+      peerConnection.onconnectionstatechange = () => {
+        if (peerConnection.connectionState === 'connected') {
+          onCallConnected();
+        } else if (['disconnected', 'failed', 'closed'].includes(peerConnection.connectionState)) {
+          endCallCleanup('Call disconnected');
+        }
+      };
+
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(call.offer));
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+
+      socket.emit('call:answer', {
+        chatId: call.chatId,
+        targetUserId: call.callerId,
+        answer
+      });
+    } catch (err) {
+      endCallCleanup('Failed to accept call: ' + err.message);
+    }
+  }
+
+  function declineIncomingCall() {
+    if (pendingIncomingCall && socket) {
+      socket.emit('call:reject', {
+        chatId: pendingIncomingCall.chatId,
+        targetUserId: pendingIncomingCall.callerId,
+        reason: 'declined'
+      });
+    }
+    pendingIncomingCall = null;
+    document.getElementById('incomingCallModal').classList.add('hidden');
+  }
+
+  function hangupActiveCall() {
+    if (activeCall && socket) {
+      socket.emit('call:hangup', {
+        chatId: activeCall.chatId,
+        targetUserId: activeCall.remoteUserId
+      });
+    }
+    endCallCleanup('Call ended');
+  }
+
+  function toggleAudioMute() {
+    if (!localStream) return;
+    const audioTrack = localStream.getAudioTracks()[0];
+    if (audioTrack) {
+      isAudioMuted = !isAudioMuted;
+      audioTrack.enabled = !isAudioMuted;
+      const btn = document.getElementById('toggleMuteBtn');
+      btn.classList.toggle('bg-rose-500', isAudioMuted);
+      btn.classList.toggle('bg-white/15', !isAudioMuted);
+      showToast(isAudioMuted ? 'Microphone muted' : 'Microphone unmuted');
+    }
+  }
+
+  function toggleVideoCamera() {
+    if (!localStream) return;
+    const videoTrack = localStream.getVideoTracks()[0];
+    if (videoTrack) {
+      isVideoMuted = !isVideoMuted;
+      videoTrack.enabled = !isVideoMuted;
+      const btn = document.getElementById('toggleCameraBtn');
+      btn.classList.toggle('bg-rose-500', isVideoMuted);
+      btn.classList.toggle('bg-white/15', !isVideoMuted);
+      showToast(isVideoMuted ? 'Camera disabled' : 'Camera enabled');
+    }
+  }
+
+  // --- INFO DRAWER ---
   function renderInfoDrawer() {
     const drawer = document.getElementById('infoDrawer');
     const chat = chats.find(c => c.id === activeChatId);
@@ -324,6 +862,11 @@
     activeChatId = chatId;
     mobileView = 'chat';
     replyingTo = null;
+    inChatSearchQuery = '';
+    currentSearchMatchIndex = -1;
+    document.getElementById('chatSearchBar').classList.add('hidden');
+    document.getElementById('chatSearchInput').value = '';
+    document.getElementById('chatSearchCounter').textContent = '0 matches';
     document.getElementById('replyBanner').classList.add('hidden');
     syncResponsivePanes();
 
@@ -380,6 +923,27 @@
       if (chatId === activeChatId) {
         renderActiveChat(true);
         renderInfoDrawer();
+      }
+
+      // Browser Desktop Notification
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted' && currentUser && message.senderId !== currentUser.id) {
+        if (document.hidden || activeChatId !== chatId) {
+          const senderName = message.senderName || 'Someone';
+          let preview = message.text;
+          if (message.type === 'image') preview = '📷 Sent a photo';
+          else if (message.type === 'audio') preview = '🎤 Sent a voice note';
+          try {
+            const notif = new Notification(chat ? chat.name : senderName, {
+              body: `${senderName}: ${preview}`,
+              icon: '/favicon.ico',
+              tag: chatId
+            });
+            notif.onclick = () => {
+              window.focus();
+              selectChat(chatId);
+            };
+          } catch (_) {}
+        }
       }
     });
 
@@ -447,6 +1011,61 @@
         renderInfoDrawer();
       }
     });
+
+    // WebRTC Signaling listeners
+    socket.on('call:incoming', data => {
+      if (peerConnection || activeCall) {
+        socket.emit('call:reject', { chatId: data.chatId, targetUserId: data.callerId, reason: 'busy' });
+        return;
+      }
+      pendingIncomingCall = data;
+      document.getElementById('incomingCallerName').textContent = data.callerName;
+      document.getElementById('incomingCallType').textContent = data.callType === 'video' ? 'Incoming Video Call...' : 'Incoming Voice Call...';
+      const av = document.getElementById('incomingCallerAvatar');
+      av.textContent = getInitials(data.callerName);
+      av.style.background = data.callerColor || '#00a884';
+      document.getElementById('incomingCallModal').classList.remove('hidden');
+
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted' && document.hidden) {
+        try {
+          new Notification('Incoming Call', {
+            body: `${data.callerName} is calling you on Eazychat...`,
+            icon: '/favicon.ico'
+          });
+        } catch (_) {}
+      }
+    });
+
+    socket.on('call:answered', async ({ answer }) => {
+      if (peerConnection && answer) {
+        try {
+          await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+          onCallConnected();
+        } catch (err) {
+          console.error('Failed to set remote description on answer:', err);
+        }
+      }
+    });
+
+    socket.on('call:ice-candidate', async ({ candidate }) => {
+      if (peerConnection && candidate) {
+        try {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (err) {
+          console.error('Failed to add remote ICE candidate:', err);
+        }
+      }
+    });
+
+    socket.on('call:rejected', ({ reason }) => {
+      showToast(reason ? `Call rejected (${reason})` : 'Call declined');
+      endCallCleanup();
+    });
+
+    socket.on('call:ended', () => {
+      showToast('Call ended by remote user');
+      endCallCleanup();
+    });
   }
 
   async function loadChats() {
@@ -462,6 +1081,7 @@
     document.getElementById('authScreen').classList.add('hidden');
     document.getElementById('appShell').classList.remove('hidden');
     renderProfileHeader();
+    updateNotificationIcon();
     syncResponsivePanes();
     connectSocket();
     await loadChats();
@@ -550,12 +1170,16 @@
     document.getElementById('replyBanner').classList.add('hidden');
   }
 
-  // Event wiring
+  // --- EVENT INITIALIZATION ---
   function init() {
     applyTheme(localStorage.getItem(THEME_KEY) === '1');
     document.getElementById('emojiGrid').innerHTML = QUICK_EMOJIS.map(e => `<button type="button" data-emoji-pick="${e}" class="p-1 rounded-lg hover:bg-[var(--bg-hover)]">${e}</button>`).join('');
 
     window.addEventListener('resize', syncResponsivePanes);
+
+    // Notifications
+    updateNotificationIcon();
+    document.getElementById('notifyToggleBtn').addEventListener('click', requestNotificationAccess);
 
     // Auth tabs
     const showAuthErr = msg => {
@@ -644,6 +1268,41 @@
       syncResponsivePanes();
     });
 
+    // In-Chat Search
+    document.getElementById('chatSearchBtn').addEventListener('click', () => toggleInChatSearch());
+    document.getElementById('closeChatSearchBtn').addEventListener('click', () => toggleInChatSearch(false));
+    document.getElementById('chatSearchInput').addEventListener('input', e => {
+      inChatSearchQuery = e.target.value.trim().toLowerCase();
+      currentSearchMatchIndex = 0;
+      renderActiveChat(false);
+    });
+    document.getElementById('chatSearchInput').addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        stepInChatSearch(e.shiftKey ? 'prev' : 'next');
+      }
+    });
+    document.getElementById('chatSearchNextBtn').addEventListener('click', () => stepInChatSearch('next'));
+    document.getElementById('chatSearchPrevBtn').addEventListener('click', () => stepInChatSearch('prev'));
+
+    // 1-on-1 WebRTC Call Buttons in header
+    document.getElementById('voiceCallBtn').addEventListener('click', () => initiateCall('voice'));
+    document.getElementById('videoCallBtn').addEventListener('click', () => initiateCall('video'));
+
+    // Incoming Call Modal buttons
+    document.getElementById('acceptCallBtn').addEventListener('click', acceptIncomingCall);
+    document.getElementById('declineCallBtn').addEventListener('click', declineIncomingCall);
+
+    // Active Call Overlay buttons
+    document.getElementById('toggleMuteBtn').addEventListener('click', toggleAudioMute);
+    document.getElementById('toggleCameraBtn').addEventListener('click', toggleVideoCamera);
+    document.getElementById('endCallBtn').addEventListener('click', hangupActiveCall);
+
+    // Voice Note Recording
+    document.getElementById('recordAudioBtn').addEventListener('click', startVoiceRecording);
+    document.getElementById('cancelVoiceBtn').addEventListener('click', cancelVoiceRecording);
+    document.getElementById('sendVoiceBtn').addEventListener('click', sendVoiceRecording);
+
     // Info Drawer
     const toggleInfo = () => { infoDrawerOpen = !infoDrawerOpen; renderInfoDrawer(); };
     document.getElementById('toggleInfoDrawerBtn').addEventListener('click', toggleInfo);
@@ -730,7 +1389,7 @@
       if (!msg) return;
 
       if (action === 'reply') {
-        replyingTo = { id: msg.id, senderName: msg.senderName, text: msg.text || '📷 Photo' };
+        replyingTo = { id: msg.id, senderName: msg.senderName, text: msg.text || (msg.type === 'audio' ? '🎤 Voice Note' : '📷 Photo') };
         document.getElementById('replyBannerAuthor').textContent = replyingTo.senderName;
         document.getElementById('replyBannerText').textContent = replyingTo.text;
         document.getElementById('replyBanner').classList.remove('hidden');
