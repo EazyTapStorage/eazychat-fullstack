@@ -4,6 +4,8 @@ const fs = require('fs');
 const http = require('http');
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
@@ -21,15 +23,75 @@ if (!fs.existsSync(UPLOADS_DIR)) {
 }
 
 const app = express();
+app.set('trust proxy', 1);
+
+// Standard security headers via Helmet
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginResourcePolicy: { policy: 'same-origin' }
+}));
+
+const rawOrigins = process.env.ALLOWED_ORIGIN || 'http://localhost:3000';
+const allowedOrigins = rawOrigins.split(',').map(s => s.trim()).filter(Boolean);
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests with no origin (e.g. mobile apps, curl, same-origin fetch)
+    if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true
+};
+
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*' }
+  cors: {
+    origin: allowedOrigins.includes('*') ? '*' : allowedOrigins,
+    credentials: true
+  }
 });
 
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json({ limit: '2mb' }));
 app.use('/uploads', express.static(UPLOADS_DIR));
 app.use(express.static(path.join(__dirname, '..', 'public')));
+
+// Rate Limiting
+const rateLimitResponse = (_req, res) => {
+  res.status(429).json({ error: 'Too many requests, please try again later.' });
+};
+
+const authRateLimitMax = process.env.AUTH_RATE_LIMIT_MAX
+  ? parseInt(process.env.AUTH_RATE_LIMIT_MAX, 10)
+  : 20;
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: authRateLimitMax,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitResponse
+});
+
+const uploadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitResponse
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitResponse
+});
+
+app.use('/api', apiLimiter);
 
 // Multer setup for image uploads
 const storage = multer.diskStorage({
@@ -150,7 +212,7 @@ function authMiddleware(req, res, next) {
 }
 
 // --- AUTH ROUTES ---
-app.post('/api/auth/register', async (req, res) => {
+app.post('/api/auth/register', authLimiter, async (req, res) => {
   try {
     const name = String(req.body.name || '').trim();
     const username = String(req.body.username || '').trim().toLowerCase();
@@ -188,7 +250,7 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', authLimiter, async (req, res) => {
   try {
     const username = String(req.body.username || '').trim().toLowerCase();
     const password = String(req.body.password || '');
@@ -314,12 +376,12 @@ app.get('/api/chats/:chatId/messages', authMiddleware, (req, res) => {
   res.json({ messages });
 });
 
-app.post('/api/upload', authMiddleware, upload.single('image'), (req, res) => {
+app.post('/api/upload', uploadLimiter, authMiddleware, upload.single('image'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No image file uploaded.' });
   res.status(201).json({ imageUrl: `/uploads/${req.file.filename}` });
 });
 
-app.post('/api/upload-audio', authMiddleware, uploadAudio.single('audio'), (req, res) => {
+app.post('/api/upload-audio', uploadLimiter, authMiddleware, uploadAudio.single('audio'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No audio file uploaded.' });
   res.status(201).json({ audioUrl: `/uploads/${req.file.filename}` });
 });
@@ -530,8 +592,11 @@ app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
-// Express error handling middleware (handles Multer upload errors and general exceptions)
+// Express error handling middleware (handles Multer upload errors, CORS rejections, and general exceptions)
 app.use((err, req, res, _next) => {
+  if (err && err.message === 'Not allowed by CORS') {
+    return res.status(403).json({ error: 'Not allowed by CORS' });
+  }
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
       const isAudio = (req.originalUrl || req.url || '').includes('audio');

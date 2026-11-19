@@ -7,6 +7,8 @@ const fs = require('fs');
 process.env.PORT = '4005';
 process.env.JWT_SECRET = 'test-secret-key-12345';
 process.env.NODE_ENV = 'test';
+process.env.ALLOWED_ORIGIN = 'http://localhost:4005,http://localhost:3000,https://eazychat.35-192-68-101.nip.io';
+process.env.AUTH_RATE_LIMIT_MAX = '20';
 
 // Use clean isolated test data directory
 const TEST_DATA_DIR = path.join(__dirname, 'test-data');
@@ -39,7 +41,7 @@ async function request(url, options = {}) {
   }
   const res = await fetch(fullUrl, { ...options, headers, body });
   const data = await res.json().catch(() => ({}));
-  return { status: res.status, ok: res.ok, data };
+  return { status: res.status, ok: res.ok, data, headers: res.headers };
 }
 
 let passed = 0;
@@ -65,10 +67,21 @@ async function runTests() {
   // Wait 600ms for server listen
   await new Promise(r => setTimeout(r, 600));
 
-  console.log('--- 1. HEALTH & CONNECTIVITY AUDIT ---');
+  console.log('--- 1. HEALTH, SECURITY HEADERS & CORS AUDIT ---');
   const health = await request('/api/health');
   assert(health.status === 200, 'Health endpoint returns HTTP 200');
   assert(health.data.status === 'ok' && health.data.app === 'Eazychat', 'Health payload valid');
+  assert(health.headers.get('x-content-type-options') === 'nosniff', 'Security header x-content-type-options: nosniff set by Helmet');
+  assert(health.headers.get('x-frame-options') === 'SAMEORIGIN', 'Security header x-frame-options: SAMEORIGIN set by Helmet');
+  assert(Boolean(health.headers.get('referrer-policy')), 'Security header referrer-policy set by Helmet');
+
+  // CORS checks
+  const allowedCors = await request('/api/health', { headers: { Origin: 'http://localhost:3000' } });
+  assert(allowedCors.headers.get('access-control-allow-origin') === 'http://localhost:3000', 'CORS allows configured ALLOWED_ORIGIN');
+
+  const unauthCors = await request('/api/health', { headers: { Origin: 'http://malicious-attacker.com' } });
+  assert(unauthCors.status === 403, 'CORS rejection for unauthorized origin returns HTTP 403');
+  assert(unauthCors.data && unauthCors.data.error === 'Not allowed by CORS', 'CORS rejection returns clean JSON error');
 
   console.log('\n--- 2. AUTHENTICATION & SECURITY VALIDATION ---');
   // Rejection of invalid username (too short)
@@ -565,6 +578,21 @@ async function runTests() {
 
   sockClientA.disconnect();
   sockClientB.disconnect();
+
+  console.log('\n--- 8. RATE LIMITING AUDIT ---');
+  let rateLimitHit = null;
+  for (let i = 0; i < 25; i++) {
+    const res = await request('/api/auth/login', {
+      method: 'POST',
+      body: { username: 'aarav', password: 'password123' }
+    });
+    if (res.status === 429) {
+      rateLimitHit = res;
+      break;
+    }
+  }
+  assert(Boolean(rateLimitHit), 'Auth rate limiter triggers HTTP 429 when threshold exceeded');
+  assert(rateLimitHit && rateLimitHit.data && rateLimitHit.data.error === 'Too many requests, please try again later.', 'Auth rate limiter returns clean HTTP 429 JSON error');
 
   console.log('\n================================================================================');
   console.log(`AUDIT RESULTS: ${passed} PASSED | ${failed} FAILED | TOTAL: ${passed + failed}`);
