@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Eazychat — Real-Time Messaging</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="h-[100dvh] w-full overflow-hidden flex items-center justify-center md:p-3 lg:p-4">
+
+  <!-- AUTH SCREEN -->
+  <div id="authScreen" class="w-full max-w-md bg-sidebar border border-theme rounded-2xl shadow-2xl overflow-hidden mx-4">
+    <div class="bg-[#00a884] px-6 py-6 text-white">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center font-bold text-lg">EC</div>
+        <div>
+          <h1 class="text-xl font-bold leading-tight">Eazychat</h1>
+          <p class="text-xs text-white/85">Real-time messaging for web & mobile</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="p-6 space-y-4">
+      <div class="grid grid-cols-2 gap-1.5 bg-header p-1 rounded-xl">
+        <button id="authTabLogin" type="button" class="py-1.5 rounded-lg text-xs font-semibold transition bg-sidebar text-main shadow-sm">Sign In</button>
+        <button id="authTabRegister" type="button" class="py-1.5 rounded-lg text-xs font-semibold transition text-sub hover:text-main">Create Account</button>
+      </div>
+
+      <div id="authError" class="hidden bg-rose-500/10 border border-rose-500/30 text-rose-600 dark:text-rose-400 text-xs px-3 py-2 rounded-lg"></div>
+
+      <!-- Login Form -->
+      <form id="loginForm" class="space-y-3">
+        <div>
+          <label class="block text-xs font-medium text-sub mb-1">Username or Phone</label>
+          <input id="loginUsername" type="text" required autocomplete="username" placeholder="e.g. priya or +919845011223" class="w-full bg-input border border-theme rounded-lg px-3 py-2 text-sm text-main focus:outline-none focus:ring-2 focus:ring-[#00a884]/50" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-sub mb-1">Password</label>
+          <input id="loginPassword" type="password" required autocomplete="current-password" placeholder="Enter your password" class="w-full bg-input border border-theme rounded-lg px-3 py-2 text-sm text-main focus:outline-none focus:ring-2 focus:ring-[#00a884]/50" />
+        </div>
+        <button type="submit" class="w-full py-2.5 rounded-xl bg-[#00a884] hover:bg-[#008f72] text-white font-semibold text-sm transition">Sign In to Eazychat</button>
+      </form>
+
+      <!-- Register Form -->
+      <form id="registerForm" class="hidden space-y-3">
+        <div>
+          <label class="block text-xs font-medium text-sub mb-1">Display Name</label>
+          <input id="regName" type="text" required placeholder="e.g. Aarav Mehta" class="w-full bg-input border border-theme rounded-lg px-3 py-2 text-sm text-main focus:outline-none focus:ring-2 focus:ring-[#00a884]/50" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-sub mb-1">Username or Phone</label>
+          <input id="regUsername" type="text" required placeholder="e.g. aarav or +919876543210" class="w-full bg-input border border-theme rounded-lg px-3 py-2 text-sm text-main focus:outline-none focus:ring-2 focus:ring-[#00a884]/50" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-sub mb-1">Password (min 6 characters)</label>
+          <input id="regPassword" type="password" required minlength="6" placeholder="Create a password" class="w-full bg-input border border-theme rounded-lg px-3 py-2 text-sm text-main focus:outline-none focus:ring-2 focus:ring-[#00a884]/50" />
+        </div>
+        <button type="submit" class="w-full py-2.5 rounded-xl bg-[#00a884] hover:bg-[#008f72] text-white font-semibold text-sm transition">Create Account</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- MAIN CHAT APP SHELL -->
+  <div id="appShell" class="hidden app-shell w-full h-full max-w-[1440px] md:rounded-xl md:shadow-2xl border border-theme flex overflow-hidden relative">
+
+    <!-- SIDEBAR -->
+    <aside id="sidebarPane" class="w-full md:w-[340px] lg:w-[380px] shrink-0 bg-sidebar border-r border-theme flex flex-col h-full">
+      <header class="bg-header px-3.5 py-2.5 flex items-center justify-between border-b border-theme shrink-0">
+        <button id="openProfileBtn" type="button" class="flex items-center gap-2.5 min-w-0 rounded-lg p-1 -ml-1 hover:bg-black/5 dark:hover:bg-white/5 transition" title="Profile & Sign Out">
+          <div id="myAvatar" class="w-9 h-9 rounded-full flex items-center justify-center font-semibold text-white text-sm shrink-0 bg-[#00a884]">EC</div>
+          <div class="text-left min-w-0">
+            <div id="myProfileName" class="font-semibold text-sm leading-tight truncate text-main">Eazychat</div>
+            <div id="myProfileStatus" class="text-[11px] text-sub truncate">Online</div>
+          </div>
+        </button>
+
+        <div class="flex items-center gap-1 shrink-0">
+          <button id="newChatBtn" type="button" class="p-2 rounded-full text-sub hover:text-main hover:bg-black/5 dark:hover:bg-white/10 transition" title="New Chat or Group" aria-label="New Chat or Group">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+          </button>
+          <button id="themeToggleBtn" type="button" class="p-2 rounded-full text-sub hover:text-main hover:bg-black/5 dark:hover:bg-white/10 transition" title="Toggle Dark Mode" aria-label="Toggle Dark Mode">
+            <svg id="themeIconMoon" class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M21.752 15.002A9.718 9.718 0 0118 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 009.002-5.998z" /></svg>
+            <svg id="themeIconSun" class="w-5 h-5 hidden" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v2.25m6.364.386l-1.591 1.591M21 12h-2.25m-.386 6.364l-1.591-1.591M12 18.75V21m-4.773-4.227l-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="px-3 pt-2.5 pb-2 border-b border-theme shrink-0 space-y-2">
+        <div class="relative flex items-center">
+          <svg class="w-4 h-4 text-sub absolute left-3 pointer-events-none" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" /></svg>
+          <input id="sidebarSearch" type="text" placeholder="Search chats" class="w-full bg-header text-main placeholder:text-sub text-sm rounded-lg pl-9 pr-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#00a884]/40 transition" />
+        </div>
+        <div id="filterPills" class="flex items-center gap-1.5">
+          <button type="button" data-filter="all" class="filter-pill px-3 py-1 rounded-full text-xs font-semibold transition">All</button>
+          <button type="button" data-filter="unread" class="filter-pill px-3 py-1 rounded-full text-xs font-medium transition">Unread</button>
+          <button type="button" data-filter="groups" class="filter-pill px-3 py-1 rounded-full text-xs font-medium transition">Groups</button>
+        </div>
+      </div>
+
+      <div id="chatList" class="flex-1 overflow-y-auto divide-y divide-[var(--border-color)]"></div>
+    </aside>
+
+    <!-- ACTIVE CHAT PANE -->
+    <main id="chatPane" class="hidden md:flex flex-1 flex-col h-full min-w-0 bg-chat-pane relative">
+      <div id="emptyChatState" class="flex-1 flex flex-col items-center justify-center text-center p-8 bg-header/50">
+        <div class="w-16 h-16 rounded-2xl bg-[#00a884]/15 text-[#00a884] flex items-center justify-center font-bold text-2xl mb-4">EC</div>
+        <h2 class="text-xl font-semibold text-main mb-1.5">Welcome to Eazychat</h2>
+        <p class="text-sm text-sub max-w-sm">Select a conversation on the left or click the <strong>+</strong> button to message another registered user or create a group.</p>
+      </div>
+
+      <div id="activeChatWrapper" class="hidden flex-1 flex-col h-full min-h-0">
+        <header class="bg-header px-3 py-2 flex items-center justify-between border-b border-theme shrink-0 z-10">
+          <div class="flex items-center gap-2.5 min-w-0">
+            <button id="mobileBackBtn" type="button" class="md:hidden p-1.5 -ml-1 rounded-full text-sub hover:text-main" aria-label="Back">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" /></svg>
+            </button>
+            <button id="headerContactBtn" type="button" class="flex items-center gap-2.5 min-w-0 text-left rounded-lg py-0.5 pr-2 hover:bg-black/5 dark:hover:bg-white/5 transition">
+              <div id="activeChatAvatar" class="w-9 h-9 rounded-full flex items-center justify-center font-semibold text-white text-sm shrink-0 relative"></div>
+              <div class="min-w-0">
+                <div id="activeChatName" class="font-semibold text-sm text-main truncate"></div>
+                <div id="activeChatStatus" class="text-xs text-sub truncate"></div>
+              </div>
+            </button>
+          </div>
+          <button id="toggleInfoDrawerBtn" type="button" class="p-2 rounded-full text-sub hover:text-main hover:bg-black/5 dark:hover:bg-white/10 transition" title="Chat Info" aria-label="Chat Info">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>
+          </button>
+        </header>
+
+        <div id="messagesContainer" class="chat-wallpaper flex-1 overflow-y-auto px-3 sm:px-6 lg:px-10 py-4 relative">
+          <div id="messagesList" class="relative z-[1] flex flex-col gap-1.5"></div>
+        </div>
+
+        <div id="replyBanner" class="hidden bg-header px-4 py-2 border-t border-theme flex items-center justify-between gap-3 shrink-0">
+          <div class="border-l-4 border-[#00a884] pl-2.5 min-w-0 flex-1 bg-black/5 dark:bg-white/5 py-1.5 pr-2 rounded-r-md">
+            <div id="replyBannerAuthor" class="text-xs font-semibold text-[#00a884] truncate"></div>
+            <div id="replyBannerText" class="text-xs text-sub truncate"></div>
+          </div>
+          <button id="cancelReplyBtn" type="button" class="p-1.5 text-sub hover:text-main rounded-full" aria-label="Cancel reply">✕</button>
+        </div>
+
+        <footer class="bg-header px-3 py-2.5 border-t border-theme shrink-0 relative z-20">
+          <div id="emojiPicker" class="hidden absolute bottom-full left-3 mb-2 w-72 max-w-[calc(100vw-24px)] bg-sidebar border border-theme rounded-xl shadow-xl p-3 z-30">
+            <div id="emojiGrid" class="grid grid-cols-8 gap-1 text-xl"></div>
+          </div>
+
+          <div class="flex items-end gap-2">
+            <button id="emojiBtn" type="button" class="p-2 rounded-full text-sub hover:text-main hover:bg-black/5 dark:hover:bg-white/10 transition shrink-0" title="Emoji">😊</button>
+            <label class="p-2 rounded-full text-sub hover:text-main hover:bg-black/5 dark:hover:bg-white/10 transition shrink-0 cursor-pointer" title="Upload image">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" /></svg>
+              <input id="photoUploadInput" type="file" accept="image/*" class="hidden" />
+            </label>
+            <textarea id="messageInput" rows="1" placeholder="Type a message" class="flex-1 bg-input text-main placeholder:text-sub text-sm rounded-xl px-3.5 py-2.5 max-h-28 resize-none focus:outline-none focus:ring-2 focus:ring-[#00a884]/40 leading-5"></textarea>
+            <button id="sendBtn" type="button" class="p-2.5 rounded-full bg-[#00a884] hover:bg-[#008f72] text-white transition shrink-0 shadow-sm" title="Send" aria-label="Send">
+              <svg class="w-5 h-5 translate-x-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M3.478 2.405a.75.75 0 00-.926.94l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94 60.519 60.519 0 0018.445-8.986.75.75 0 000-1.218A60.517 60.517 0 003.478 2.405z" /></svg>
+            </button>
+          </div>
+        </footer>
+      </div>
+    </main>
+
+    <!-- INFO DRAWER -->
+    <aside id="infoDrawer" class="hidden w-full sm:w-[320px] shrink-0 bg-sidebar border-l border-theme flex-col h-full absolute right-0 top-0 bottom-0 z-30 lg:static shadow-xl lg:shadow-none">
+      <header class="bg-header px-4 py-3 flex items-center gap-3 border-b border-theme shrink-0">
+        <button id="closeInfoDrawerBtn" type="button" class="p-1.5 -ml-1 rounded-full text-sub hover:text-main" aria-label="Close">✕</button>
+        <h3 id="infoDrawerTitle" class="font-semibold text-sm text-main">Chat Info</h3>
+      </header>
+      <div id="infoDrawerBody" class="flex-1 overflow-y-auto p-5 space-y-5"></div>
+    </aside>
+  </div>
+
+  <!-- MODAL: NEW CHAT / GROUP -->
+  <div id="newChatModal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+    <div class="bg-sidebar border border-theme rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+      <div class="bg-header px-5 py-3.5 flex items-center justify-between border-b border-theme">
+        <h3 class="font-semibold text-base text-main">New Conversation</h3>
+        <button id="closeNewChatModalBtn" type="button" class="p-1 text-sub hover:text-main">✕</button>
+      </div>
+      <div class="p-5 space-y-4">
+        <div class="grid grid-cols-2 gap-1.5 bg-header p-1 rounded-xl">
+          <button id="tabDirectChat" type="button" class="py-1.5 rounded-lg text-xs font-semibold transition">Direct Message</button>
+          <button id="tabGroupChat" type="button" class="py-1.5 rounded-lg text-xs font-semibold transition">New Group</button>
+        </div>
+
+        <div id="directUsersPanel" class="space-y-2 max-h-64 overflow-y-auto"></div>
+
+        <form id="groupChatForm" class="hidden space-y-3">
+          <div>
+            <label class="block text-xs font-medium text-sub mb-1">Group Name</label>
+            <input id="newGroupName" type="text" required placeholder="e.g. Project Alpha" class="w-full bg-input border border-theme rounded-lg px-3 py-2 text-sm text-main focus:outline-none focus:ring-2 focus:ring-[#00a884]/50" />
+          </div>
+          <div id="groupUsersChecklist" class="space-y-1.5 max-h-48 overflow-y-auto"></div>
+          <button type="submit" class="w-full py-2.5 rounded-xl bg-[#00a884] hover:bg-[#008f72] text-white font-semibold text-sm transition">Create Group</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: PROFILE -->
+  <div id="profileModal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+    <div class="bg-sidebar border border-theme rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden">
+      <div class="bg-header px-5 py-3.5 flex items-center justify-between border-b border-theme">
+        <h3 class="font-semibold text-base text-main">Your Profile</h3>
+        <button id="closeProfileModalBtn" type="button" class="p-1 text-sub hover:text-main">✕</button>
+      </div>
+      <form id="profileForm" class="p-5 space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-sub mb-1">Display Name</label>
+          <input id="profileNameInput" type="text" required class="w-full bg-input border border-theme rounded-lg px-3 py-2 text-sm text-main focus:outline-none focus:ring-2 focus:ring-[#00a884]/50" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-sub mb-1">About</label>
+          <input id="profileAboutInput" type="text" class="w-full bg-input border border-theme rounded-lg px-3 py-2 text-sm text-main focus:outline-none focus:ring-2 focus:ring-[#00a884]/50" />
+        </div>
+        <div class="flex items-center gap-2 pt-1">
+          <button type="submit" class="flex-1 py-2 rounded-xl bg-[#00a884] hover:bg-[#008f72] text-white font-semibold text-sm transition">Save</button>
+          <button id="logoutBtn" type="button" class="px-4 py-2 rounded-xl border border-theme text-xs font-semibold text-rose-500 hover:bg-rose-500/10 transition">Sign Out</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: LIGHTBOX -->
+  <div id="lightboxModal" class="hidden fixed inset-0 bg-black/85 z-50 flex items-center justify-center p-4">
+    <button id="closeLightboxBtn" type="button" class="absolute top-4 right-4 px-3 py-1.5 rounded-full bg-white/15 text-white text-sm">✕</button>
+    <img id="lightboxImg" src="" alt="Preview" class="max-w-full max-h-[85vh] rounded-xl shadow-2xl object-contain" />
+  </div>
+
+  <div id="toast" class="hidden fixed bottom-5 left-1/2 -translate-x-1/2 z-50 bg-[#111b21] dark:bg-[#e9edef] text-white dark:text-[#111b21] px-4 py-2 rounded-full text-xs font-medium shadow-lg"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
